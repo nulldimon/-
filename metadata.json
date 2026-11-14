@@ -1,0 +1,6 @@
+{
+  "name": "ГолосГид",
+  "description": "Голосовое управление планшетом Huawei без Google-сервисов: поиск на YouTube, закрытие одной командой и озвучка для незрячих пользователей.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

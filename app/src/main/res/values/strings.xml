@@ -1,0 +1,15 @@
+<resources>
+    <string name="app_name">ГолосГид</string>
+    <string name="accessibility_service_label">ГолосГид — голосовое управление</string>
+    <string name="notification_listener_label">ГолосГид — чтение уведомлений и сообщений</string>
+    <string name="accessibility_service_description">Позволяет приложению ГолосГид закрывать YouTube одной голосовой командой, возвращаться на главный экран, прокручивать список видео и помогать незрячим пользователям управлять планшетом Huawei без Google-сервисов.</string>
+    <string name="notification_channel_name">Фоновое прослушивание</string>
+    <string name="notification_channel_desc">Показывает статус микрофона, чтобы вы могли управлять планшетом и YouTube голосом в фоне.</string>
+    <string name="notification_title_listening">ГолосГид слушает в фоне</string>
+    <string name="notification_title_paused">Микрофон на паузе</string>
+    <string name="notification_text_listening">Скажите «Открой ютуб и найди …» или «Закрой»</string>
+    <string name="notification_text_paused">Нажмите «Слушать», чтобы включить голос</string>
+    <string name="action_pause">Пауза</string>
+    <string name="action_resume">Слушать</string>
+    <string name="action_stop">Остановить</string>
+</resources>
