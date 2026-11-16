@@ -129,10 +129,17 @@ class VoiceBackgroundService : Service() {
     @Volatile
     private var captureGeneration: Long = 0L
     private var activeModelDir: File? = null
+    @Volatile
+    private var preferMicSourceFallback: Boolean = false
+    @Volatile
+    private var consecutiveLoopCrashes: Int = 0
 
     // Optional system SpeechRecognizer fallback (if non-Google recognizer exists on device)
     private var systemRecognizer: SpeechRecognizer? = null
     private var isSystemListening = false
+    private var systemRestartRunnable: Runnable? = null
+    private var systemListenStartedMs: Long = 0L
+    private var consecutiveSystemErrors: Int = 0
 
     // Debounce & echo guard
     private var lastExecutedNormText: String = ""
@@ -175,12 +182,20 @@ class VoiceBackgroundService : Service() {
                     pauseCaptureForTts = true
                     needResetRecognizer = true
                     urgentPartialJob?.cancel()
+                    cancelPendingSystemRestart()
+                    if (isSystemListening && systemRecognizer != null) {
+                        isSystemListening = false
+                        try {
+                            systemRecognizer?.cancel()
+                        } catch (_: Exception) {
+                        }
+                    }
                 } else {
                     delay(200L)
                     needResetRecognizer = true
                     pauseCaptureForTts = false
-                    if (!isPausedByUser && systemRecognizer != null && !isSystemListening) {
-                        startSystemListeningCycle()
+                    if (!isPausedByUser && systemRecognizer != null && !isSystemListening && systemRestartRunnable == null) {
+                        scheduleSystemListeningCycle(300L)
                     }
                 }
             }
@@ -326,6 +341,7 @@ class VoiceBackgroundService : Service() {
                 recognizer = Recognizer(loadedModel, SAMPLE_RATE.toFloat())
                 val audioBuffer = ShortArray(READ_CHUNK_SAMPLES)
                 var zeroReadStreak = 0
+                var recorderOpenFailures = 0
                 var lastPartialCheckMs = 0L
                 var lastSentPartial = ""
 
@@ -333,6 +349,20 @@ class VoiceBackgroundService : Service() {
                     if (recorder == null) {
                         recorder = createInitializedAudioRecord()
                         if (recorder == null) {
+                            recorderOpenFailures++
+                            preferMicSourceFallback = !preferMicSourceFallback
+                            if (recorderOpenFailures >= 6) {
+                                mainHandler.post {
+                                    if (captureGeneration == myGen && !isPausedByUser) {
+                                        VoiceEngineStateHolder.updateStatus(
+                                            ListeningStatus.ERROR,
+                                            SpeechEngineKind.VOSK_OFFLINE,
+                                            "Микрофон занят другим приложением. Нажмите кнопку микрофона, чтобы возобновить."
+                                        )
+                                    }
+                                }
+                                break
+                            }
                             mainHandler.post {
                                 if (captureGeneration == myGen && !isPausedByUser) {
                                     VoiceEngineStateHolder.updateStatus(
@@ -342,9 +372,11 @@ class VoiceBackgroundService : Service() {
                                     )
                                 }
                             }
-                            delay(900L)
+                            val waitMs = (1200L * recorderOpenFailures).coerceAtMost(4500L)
+                            delay(waitMs)
                             continue
                         }
+                        recorderOpenFailures = 0
 
                         if (!announced) {
                             announced = true
@@ -381,7 +413,8 @@ class VoiceBackgroundService : Service() {
                     if (activeRecorder.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
                         releaseRecorderQuietly(activeRecorder)
                         recorder = null
-                        delay(450L)
+                        preferMicSourceFallback = !preferMicSourceFallback
+                        delay(1000L)
                         continue
                     }
 
@@ -396,25 +429,28 @@ class VoiceBackgroundService : Service() {
                         releaseRecorderQuietly(activeRecorder)
                         recorder = null
                         zeroReadStreak = 0
+                        preferMicSourceFallback = !preferMicSourceFallback
                         needResetRecognizer = true
-                        delay(500L)
+                        delay(1200L)
                         continue
                     }
 
                     if (nread == 0) {
                         zeroReadStreak++
                         delay(30L)
-                        if (zeroReadStreak >= 75) {
+                        if (zeroReadStreak >= 200) {
                             releaseRecorderQuietly(activeRecorder)
                             recorder = null
                             zeroReadStreak = 0
+                            preferMicSourceFallback = !preferMicSourceFallback
                             needResetRecognizer = true
-                            delay(350L)
+                            delay(1200L)
                         }
                         continue
                     }
 
                     zeroReadStreak = 0
+                    consecutiveLoopCrashes = 0
 
                     if (pauseCaptureForTts) {
                         needResetRecognizer = true
@@ -486,10 +522,17 @@ class VoiceBackgroundService : Service() {
         ).coerceAtLeast(READ_CHUNK_SAMPLES * 2)
         val bufferBytes = max(minBuf * 2, SAMPLE_RATE) // ~0.5s buffer at 16kHz 16-bit
 
-        val sources = intArrayOf(
-            MediaRecorder.AudioSource.VOICE_RECOGNITION,
-            MediaRecorder.AudioSource.MIC
-        )
+        val sources = if (preferMicSourceFallback) {
+            intArrayOf(
+                MediaRecorder.AudioSource.MIC,
+                MediaRecorder.AudioSource.VOICE_RECOGNITION
+            )
+        } else {
+            intArrayOf(
+                MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                MediaRecorder.AudioSource.MIC
+            )
+        }
 
         for (source in sources) {
             var candidate: AudioRecord? = null
@@ -534,9 +577,19 @@ class VoiceBackgroundService : Service() {
 
     private fun scheduleCaptureRetry(expectedGen: Long) {
         if (isPausedByUser) return
+        consecutiveLoopCrashes++
+        if (consecutiveLoopCrashes > 5) {
+            VoiceEngineStateHolder.updateStatus(
+                ListeningStatus.ERROR,
+                SpeechEngineKind.VOSK_OFFLINE,
+                "Не удалось перезапустить микрофон. Нажмите на кнопку микрофона для запуска."
+            )
+            return
+        }
         val dir = activeModelDir ?: voskModelManager.getReadyModelDir() ?: return
+        val backoffMs = (1500L * consecutiveLoopCrashes).coerceAtMost(6000L)
         serviceScope.launch {
-            delay(1400L)
+            delay(backoffMs)
             if (!isPausedByUser && captureGeneration == expectedGen && voskLoopJob?.isActive != true) {
                 startVoskCaptureLoop(dir, announceReady = false)
             }
@@ -595,6 +648,8 @@ class VoiceBackgroundService : Service() {
     private fun startSystemSpeechFallback() {
         mainHandler.post {
             try {
+                cancelPendingSystemRestart()
+                consecutiveSystemErrors = 0
                 if (systemRecognizer == null) {
                     systemRecognizer = SpeechRecognizer.createSpeechRecognizer(this).apply {
                         setRecognitionListener(systemRecognitionListener)
@@ -602,7 +657,7 @@ class VoiceBackgroundService : Service() {
                 }
                 VoiceEngineStateHolder.updateStatus(ListeningStatus.LISTENING, SpeechEngineKind.SYSTEM_RECOGNIZER)
                 updateNotification(isPaused = false)
-                startSystemListeningCycle()
+                scheduleSystemListeningCycle(150L)
             } catch (_: Exception) {
                 VoiceEngineStateHolder.updateStatus(
                     ListeningStatus.ERROR,
@@ -613,8 +668,24 @@ class VoiceBackgroundService : Service() {
         }
     }
 
-    private fun startSystemListeningCycle() {
+    private fun cancelPendingSystemRestart() {
+        systemRestartRunnable?.let { mainHandler.removeCallbacks(it) }
+        systemRestartRunnable = null
+    }
+
+    private fun scheduleSystemListeningCycle(delayMs: Long) {
+        cancelPendingSystemRestart()
         if (isPausedByUser || feedbackManager.isSpeaking.value) return
+        val runnable = Runnable {
+            systemRestartRunnable = null
+            startSystemListeningCycle()
+        }
+        systemRestartRunnable = runnable
+        mainHandler.postDelayed(runnable, delayMs)
+    }
+
+    private fun startSystemListeningCycle() {
+        if (isPausedByUser || feedbackManager.isSpeaking.value || isSystemListening) return
         val recognizer = systemRecognizer ?: return
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
@@ -623,6 +694,7 @@ class VoiceBackgroundService : Service() {
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
         }
         isSystemListening = true
+        systemListenStartedMs = System.currentTimeMillis()
         try {
             recognizer.startListening(intent)
         } catch (_: Exception) {
@@ -641,21 +713,47 @@ class VoiceBackgroundService : Service() {
 
         override fun onError(error: Int) {
             isSystemListening = false
-            if (!isPausedByUser) {
-                mainHandler.postDelayed({ startSystemListeningCycle() }, 450L)
+            if (isPausedByUser) return
+            if (feedbackManager.isSpeaking.value) return
+
+            val elapsedMs = System.currentTimeMillis() - systemListenStartedMs
+            val isFatalOrBusy = error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS ||
+                error == SpeechRecognizer.ERROR_AUDIO ||
+                error == SpeechRecognizer.ERROR_CLIENT ||
+                error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY ||
+                error == SpeechRecognizer.ERROR_NETWORK ||
+                error == SpeechRecognizer.ERROR_SERVER
+            if (isFatalOrBusy || elapsedMs < 2500L) {
+                consecutiveSystemErrors += 2
+            } else {
+                consecutiveSystemErrors += 1
             }
+
+            if (consecutiveSystemErrors >= 4 || error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+                cancelPendingSystemRestart()
+                stopSystemRecognizer()
+                VoiceEngineStateHolder.updateStatus(
+                    ListeningStatus.ERROR,
+                    SpeechEngineKind.SYSTEM_RECOGNIZER,
+                    "Системный микрофон сбрасывается со звуковым сигналом. Скачайте офлайн-модель Vosk во вкладке «Настройка» для тихой постоянной работы."
+                )
+                return
+            }
+
+            scheduleSystemListeningCycle(1200L)
         }
 
         override fun onResults(results: Bundle?) {
             isSystemListening = false
+            consecutiveSystemErrors = 0
             VoiceEngineStateHolder.updatePartialTranscript("")
             val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
             val text = matches?.firstOrNull().orEmpty()
             if (text.isNotBlank()) {
                 handleRecognizedPhrase(text, fromUrgentPartial = false)
             }
-            if (!isPausedByUser) {
-                mainHandler.postDelayed({ startSystemListeningCycle() }, 350L)
+            if (!isPausedByUser && !feedbackManager.isSpeaking.value) {
+                scheduleSystemListeningCycle(700L)
             }
         }
 
@@ -742,6 +840,7 @@ class VoiceBackgroundService : Service() {
     private fun stopSystemRecognizer() {
         isSystemListening = false
         mainHandler.post {
+            cancelPendingSystemRestart()
             try {
                 systemRecognizer?.cancel()
                 systemRecognizer?.destroy()

@@ -420,6 +420,13 @@ object PhoneAndDeviceController {
         val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
         val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
         am.setStreamVolume(AudioManager.STREAM_MUSIC, max, AudioManager.FLAG_SHOW_UI)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                val accMax = am.getStreamMaxVolume(AudioManager.STREAM_ACCESSIBILITY)
+                am.setStreamVolume(AudioManager.STREAM_ACCESSIBILITY, accMax, 0)
+            } catch (_: Exception) {
+            }
+        }
     }
 
     fun readVolumeSummary(context: Context): String {

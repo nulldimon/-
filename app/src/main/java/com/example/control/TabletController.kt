@@ -215,10 +215,23 @@ class TabletController(
             VoiceCommand.SpeakLouder -> {
                 audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI)
                 audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_RAISE, 0)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    try {
+                        audioManager.adjustStreamVolume(AudioManager.STREAM_ACCESSIBILITY, AudioManager.ADJUST_RAISE, 0)
+                        audioManager.adjustStreamVolume(AudioManager.STREAM_ACCESSIBILITY, AudioManager.ADJUST_RAISE, 0)
+                    } catch (_: Exception) {
+                    }
+                }
                 recordAndSpeak(spokenText, "Говорю громче", true, forceSpeak = true, settings = settings)
             }
             VoiceCommand.SpeakQuieter -> {
                 audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    try {
+                        audioManager.adjustStreamVolume(AudioManager.STREAM_ACCESSIBILITY, AudioManager.ADJUST_LOWER, 0)
+                    } catch (_: Exception) {
+                    }
+                }
                 recordAndSpeak(spokenText, "Говорю тише", true, forceSpeak = true, settings = settings)
             }
             VoiceCommand.SpeakSlower -> {
